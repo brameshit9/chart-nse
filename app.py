@@ -197,3 +197,97 @@ if chart_col:
 if about_text:
     st.write("# ABOUT")
     st.write(about_text)
+
+# ---------------------------------------------------------------------------
+# NIFTY 50 Scanner: price vs VWAP & EMA9
+# ---------------------------------------------------------------------------
+# NOTE: NIFTY 50 constituents change periodically (index reshuffles happen
+# roughly every 6 months) - update this list if it drifts from the official
+# composition at nseindia.com/products-services/indices-nifty50-index.
+NIFTY_50_SYMBOLS = [
+    "ADANIENT", "ADANIPORTS", "APOLLOHOSP", "ASIANPAINT", "AXISBANK",
+    "BAJAJ-AUTO", "BAJFINANCE", "BAJAJFINSV", "BEL", "BHARTIARTL",
+    "BPCL", "CIPLA", "COALINDIA", "DRREDDY", "EICHERMOT",
+    "GRASIM", "HCLTECH", "HDFCBANK", "HDFCLIFE", "HEROMOTOCO",
+    "HINDALCO", "HINDUNILVR", "ICICIBANK", "ITC", "INDUSINDBK",
+    "INFY", "JSWSTEEL", "KOTAKBANK", "LT", "M&M",
+    "MARUTI", "NTPC", "NESTLEIND", "ONGC", "POWERGRID",
+    "RELIANCE", "SBILIFE", "SHRIRAMFIN", "SBIN", "SUNPHARMA",
+    "TCS", "TATACONSUM", "TATAMOTORS", "TATASTEEL", "TECHM",
+    "TITAN", "TRENT", "ULTRACEMCO", "WIPRO", "LTIM",
+]
+
+
+def add_ema(df: pd.DataFrame, span: int = 9) -> pd.DataFrame:
+    df = df.copy()
+    df["EMA9"] = df["Close"].ewm(span=span, adjust=False).mean()
+    return df
+
+
+def classify_latest(df: pd.DataFrame):
+    """Return 'above' if the latest close is above both VWAP and EMA9,
+    'below' if it's below both, otherwise None (mixed signal)."""
+    if df.empty or len(df) < 2:
+        return None
+    latest = df.iloc[-1]
+    if pd.isna(latest.get("VWAP")) or pd.isna(latest.get("EMA9")):
+        return None
+    if latest["Close"] > latest["VWAP"] and latest["Close"] > latest["EMA9"]:
+        return "above"
+    if latest["Close"] < latest["VWAP"] and latest["Close"] < latest["EMA9"]:
+        return "below"
+    return None
+
+
+st.write("---")
+st.header("NIFTY 50 Scanner: Price vs VWAP & EMA9")
+st.caption(
+    "Classifies each NIFTY 50 stock by its latest daily close: bullish if "
+    "above both VWAP and EMA9, bearish if below both. Uses ~1 month of "
+    "daily bars per stock (EMA9 needs some warmup); VWAP is approximated "
+    "as (High + Low + Close) / 3 since NSE's historical API doesn't "
+    "provide true VWAP."
+)
+
+if st.button("Run NIFTY 50 scan"):
+    scan_start = (datetime.today() - relativedelta(months=1)).date()
+    scan_end = datetime.today().date()
+
+    above_stocks = {}
+    below_stocks = {}
+
+    progress = st.progress(0.0, text="Scanning NIFTY 50 stocks...")
+    for i, sym in enumerate(NIFTY_50_SYMBOLS):
+        hist = get_history(symbol=sym, start=scan_start, end=scan_end)
+        if not hist.empty and {"Close", "VWAP"}.issubset(hist.columns):
+            hist = add_ema(hist)
+            result = classify_latest(hist)
+            if result == "above":
+                above_stocks[sym] = hist
+            elif result == "below":
+                below_stocks[sym] = hist
+        progress.progress((i + 1) / len(NIFTY_50_SYMBOLS), text=f"Scanning {sym}...")
+    progress.empty()
+
+    st.session_state.scan_above = above_stocks
+    st.session_state.scan_below = below_stocks
+
+if "scan_above" in st.session_state or "scan_below" in st.session_state:
+    above_stocks = st.session_state.get("scan_above", {})
+    below_stocks = st.session_state.get("scan_below", {})
+
+    st.subheader(f"📈 Price above VWAP & EMA9 ({len(above_stocks)})")
+    if above_stocks:
+        for sym, hist in above_stocks.items():
+            st.write(f"**{sym}**")
+            st.line_chart(hist[["Close", "VWAP", "EMA9"]])
+    else:
+        st.write("No stocks currently in this group.")
+
+    st.subheader(f"📉 Price below VWAP & EMA9 ({len(below_stocks)})")
+    if below_stocks:
+        for sym, hist in below_stocks.items():
+            st.write(f"**{sym}**")
+            st.line_chart(hist[["Close", "VWAP", "EMA9"]])
+    else:
+        st.write("No stocks currently in this group.")
