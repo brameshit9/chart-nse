@@ -1,5 +1,6 @@
 from dateutil.relativedelta import relativedelta
 from datetime import datetime
+import io
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
@@ -30,9 +31,43 @@ def get_class_contents(name: str, class_name: str) -> str:
     return t
 
 
-@st.cache_data(ttl=300)
+NSE_EQUITY_LIST_URL = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
+_NSE_HEADERS = {"User-Agent": "Mozilla/5.0"}
+
+
+@st.cache_data(ttl=3600)
 def get_symbol_map() -> dict:
-    symbol_list = pd.read_csv("EQUITY_L.csv")
+    """Get the NSE symbol -> company name map.
+
+    Tries to download the current list from NSE first (so it stays fresh
+    without needing manual updates); falls back to a bundled EQUITY_L.csv
+    in the repo if the download fails (e.g. NSE blocking the request, no
+    network access, etc.).
+    """
+    symbol_list = None
+
+    try:
+        resp = requests.get(NSE_EQUITY_LIST_URL, headers=_NSE_HEADERS, timeout=10)
+        resp.raise_for_status()
+        symbol_list = pd.read_csv(io.StringIO(resp.text))
+    except Exception as e:
+        st.warning(
+            f"Couldn't fetch the latest symbol list from NSE ({e}); "
+            "falling back to the bundled EQUITY_L.csv."
+        )
+
+    if symbol_list is None:
+        try:
+            symbol_list = pd.read_csv("EQUITY_L.csv")
+        except FileNotFoundError:
+            st.error(
+                "No symbol list available: the NSE download failed and there's "
+                "no local EQUITY_L.csv bundled with the app. Add EQUITY_L.csv "
+                "to the repo root as a fallback."
+            )
+            st.stop()
+
+    symbol_list.columns = [c.strip() for c in symbol_list.columns]
     return dict(zip(symbol_list["SYMBOL"], symbol_list["NAME OF COMPANY"]))
 
 
