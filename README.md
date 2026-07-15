@@ -34,9 +34,15 @@ streamlit run app.py
 ```
 
 You'll need an `EQUITY_L.csv` file (the NSE list of equities — symbol +
-company name) in the project root. You can download an up-to-date copy
-from the [NSE India website](https://www.nseindia.com/market-data/securities-available-for-trading)
-(look for "Equity List — Security wise"). It needs at least two columns:
+company name) in the project root **as a fallback only**. On each run the
+app first tries to download the current list straight from NSE
+(`https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv`, cached
+for an hour); if that request fails for any reason (network restrictions,
+NSE rate-limiting, etc.) it falls back to the bundled `EQUITY_L.csv`. If
+neither is available the app stops with an error asking you to add the
+file. You can still refresh your local copy manually from the
+[NSE India website](https://www.nseindia.com/market-data/securities-available-for-trading)
+if you want to update the fallback. It needs at least two columns:
 `SYMBOL` and `NAME OF COMPANY`.
 
 ## Deploying
@@ -52,8 +58,9 @@ git remote add origin https://github.com/<your-username>/<your-repo>.git
 git push -u origin main
 ```
 
-Make sure `EQUITY_L.csv` is committed too (or fetched at runtime — see
-"Notes" below), since Streamlit Cloud only has access to files in the repo.
+Make sure `EQUITY_L.csv` is committed too as a fallback (Streamlit Cloud
+only has access to files in the repo, and NSE occasionally blocks
+requests from cloud IPs) — see "Notes" below.
 
 ### 2. Deploy on Streamlit Community Cloud
 
