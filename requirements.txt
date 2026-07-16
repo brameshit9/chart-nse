@@ -4,5 +4,5 @@ requests>=2.31
 beautifulsoup4>=4.12
 lxml>=4.9
 nsepython>=2.94
-nsetools>=2.0.1
+plotly>=5.20
 python-dateutil>=2.9
