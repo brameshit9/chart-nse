@@ -48,14 +48,30 @@ if you want to update the fallback. It needs at least two columns:
 ## NIFTY 50 live scanner
 
 At the bottom of the app, **"Run NIFTY 50 live scan"** fetches a real-time
-quote (via `nsetools`) for each of the 50 constituents, compares the live
-LTP to NSE's live intraday VWAP and to an EMA9 (daily closes with the
-current LTP appended as today's still-forming bar), and buckets each
-stock as bullish (LTP above both) or bearish (LTP below both), with a
-chart per stock. Quotes are cached for 15 seconds - re-run the scan to
-refresh. Scanning all 50 stocks makes 50+ live requests to NSE, so it can
-take a little while and is gated behind a button rather than running
-automatically.
+quote for each of the 50 constituents via `nsepython`'s `nse_eq()` (this
+reuses the same NSE session that already works for `equity_history()`,
+rather than opening a second session through a different library - that
+mismatch was causing every quote to silently fail). It compares live LTP
+to NSE's live VWAP and to an EMA9 (daily closes with the current LTP
+appended as today's still-forming bar), buckets each stock as bullish
+(LTP above both) or bearish (LTP below both), and renders a **candlestick
+chart per stock** (Plotly) with VWAP and EMA9 overlaid, plus LTP/VWAP/EMA9
+as live metrics.
+
+If a scan comes back with 0 stocks in both groups, expand the "symbol(s)
+failed to fetch" warning it shows - it now surfaces the actual error per
+symbol instead of failing silently. The most common cause is NSE
+rate-limiting or blocking the server's IP (common on cloud hosts); try
+again after a minute, or run it locally where the source IP tends to be
+less restricted.
+
+**Important caveat on the charts:** NSE's free public API only provides
+*daily* bars, not intraday candles. So while the chart looks like a
+TradingView-style candlestick with a VWAP session line (each daily candle
++ that day's VWAP + EMA9), it isn't the same as an intraday chart built
+from minute-by-minute ticks. For genuine intraday candles and a true
+tick-built session VWAP, you'd need a broker API with market data access
+(e.g. Zerodha Kite Connect, Upstox).
 
 ## Deploying
 
