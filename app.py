@@ -6,6 +6,7 @@ import requests
 from bs4 import BeautifulSoup
 import streamlit as st
 from nsepython import equity_history
+from nsetools import Nse
 
 
 # ---------------------------------------------------------------------------
@@ -224,70 +225,110 @@ def add_ema(df: pd.DataFrame, span: int = 9) -> pd.DataFrame:
     return df
 
 
-def classify_latest(df: pd.DataFrame):
-    """Return 'above' if the latest close is above both VWAP and EMA9,
-    'below' if it's below both, otherwise None (mixed signal)."""
-    if df.empty or len(df) < 2:
+@st.cache_resource
+def get_nse_client():
+    return Nse()
+
+
+@st.cache_data(ttl=15)
+def get_live_quote(symbol: str):
+    """Real-time NSE quote: last traded price, today's VWAP, day OHLC.
+    Cached for 15s so a full 50-stock scan doesn't hammer NSE, while still
+    staying close to live."""
+    nse = get_nse_client()
+    try:
+        return nse.get_quote(symbol)
+    except Exception:
         return None
-    latest = df.iloc[-1]
-    if pd.isna(latest.get("VWAP")) or pd.isna(latest.get("EMA9")):
-        return None
-    if latest["Close"] > latest["VWAP"] and latest["Close"] > latest["EMA9"]:
-        return "above"
-    if latest["Close"] < latest["VWAP"] and latest["Close"] < latest["EMA9"]:
-        return "below"
-    return None
+
+
+@st.cache_data(ttl=15)
+def get_live_ema9(symbol: str, ltp: float):
+    """EMA9 built from ~2 months of daily closes with today's live price
+    appended as the most recent (still-forming) bar - gives an EMA9 value
+    that reflects the current live tick rather than yesterday's close."""
+    hist_start = (datetime.today() - relativedelta(months=2)).date()
+    hist_end = datetime.today().date()
+    hist = get_history(symbol=symbol, start=hist_start, end=hist_end)
+    if hist.empty or "Close" not in hist.columns:
+        return None, None
+    closes = hist["Close"].tolist()
+    closes.append(ltp)
+    series = pd.Series(closes)
+    ema = series.ewm(span=9, adjust=False).mean()
+    return ema.iloc[-1], hist
 
 
 st.write("---")
-st.header("NIFTY 50 Scanner: Price vs VWAP & EMA9")
+st.header("NIFTY 50 Scanner: Live Price vs VWAP & EMA9")
 st.caption(
-    "Classifies each NIFTY 50 stock by its latest daily close: bullish if "
-    "above both VWAP and EMA9, bearish if below both. Uses ~1 month of "
-    "daily bars per stock (EMA9 needs some warmup); VWAP is approximated "
-    "as (High + Low + Close) / 3 since NSE's historical API doesn't "
-    "provide true VWAP."
+    "Classifies each NIFTY 50 stock using its real-time last traded price "
+    "(LTP) against NSE's live intraday VWAP: bullish if LTP is above both "
+    "VWAP and EMA9, bearish if below both. EMA9 is computed from recent "
+    "daily closes with the current LTP appended as today's still-forming "
+    "bar, so it reflects the live price. Quotes are cached for 15 seconds "
+    "- re-run the scan to refresh."
 )
 
-if st.button("Run NIFTY 50 scan"):
-    scan_start = (datetime.today() - relativedelta(months=1)).date()
-    scan_end = datetime.today().date()
-
+if st.button("Run NIFTY 50 live scan"):
     above_stocks = {}
     below_stocks = {}
 
-    progress = st.progress(0.0, text="Scanning NIFTY 50 stocks...")
+    progress = st.progress(0.0, text="Fetching live quotes...")
     for i, sym in enumerate(NIFTY_50_SYMBOLS):
-        hist = get_history(symbol=sym, start=scan_start, end=scan_end)
-        if not hist.empty and {"Close", "VWAP"}.issubset(hist.columns):
-            hist = add_ema(hist)
-            result = classify_latest(hist)
-            if result == "above":
-                above_stocks[sym] = hist
-            elif result == "below":
-                below_stocks[sym] = hist
-        progress.progress((i + 1) / len(NIFTY_50_SYMBOLS), text=f"Scanning {sym}...")
+        quote = get_live_quote(sym)
+        progress.progress((i + 1) / len(NIFTY_50_SYMBOLS), text=f"Fetching {sym}...")
+        if not quote:
+            continue
+
+        ltp = quote.get("lastPrice")
+        vwap = quote.get("vwap")
+        if ltp is None or vwap is None:
+            continue
+
+        ema9, hist = get_live_ema9(sym, ltp)
+        if ema9 is None:
+            continue
+
+        entry = {"ltp": ltp, "vwap": vwap, "ema9": ema9, "hist": hist}
+        if ltp > vwap and ltp > ema9:
+            above_stocks[sym] = entry
+        elif ltp < vwap and ltp < ema9:
+            below_stocks[sym] = entry
     progress.empty()
 
     st.session_state.scan_above = above_stocks
     st.session_state.scan_below = below_stocks
 
+
+def render_group(stocks: dict):
+    for sym, data in stocks.items():
+        st.write(f"**{sym}**")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("LTP", f"₹{data['ltp']:.2f}")
+        c2.metric("VWAP", f"₹{data['vwap']:.2f}")
+        c3.metric("EMA9", f"₹{data['ema9']:.2f}")
+
+        chart_df = data["hist"][["Close"]].copy()
+        today_ts = pd.Timestamp(datetime.today().date())
+        chart_df.loc[today_ts, "Close"] = data["ltp"]
+        chart_df = chart_df.sort_index()
+        chart_df["EMA9"] = chart_df["Close"].ewm(span=9, adjust=False).mean()
+        st.line_chart(chart_df[["Close", "EMA9"]])
+
+
 if "scan_above" in st.session_state or "scan_below" in st.session_state:
     above_stocks = st.session_state.get("scan_above", {})
     below_stocks = st.session_state.get("scan_below", {})
 
-    st.subheader(f"📈 Price above VWAP & EMA9 ({len(above_stocks)})")
+    st.subheader(f"📈 LTP above VWAP & EMA9 ({len(above_stocks)})")
     if above_stocks:
-        for sym, hist in above_stocks.items():
-            st.write(f"**{sym}**")
-            st.line_chart(hist[["Close", "VWAP", "EMA9"]])
+        render_group(above_stocks)
     else:
         st.write("No stocks currently in this group.")
 
-    st.subheader(f"📉 Price below VWAP & EMA9 ({len(below_stocks)})")
+    st.subheader(f"📉 LTP below VWAP & EMA9 ({len(below_stocks)})")
     if below_stocks:
-        for sym, hist in below_stocks.items():
-            st.write(f"**{sym}**")
-            st.line_chart(hist[["Close", "VWAP", "EMA9"]])
+        render_group(below_stocks)
     else:
         st.write("No stocks currently in this group.")
