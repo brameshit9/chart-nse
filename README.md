@@ -45,6 +45,18 @@ file. You can still refresh your local copy manually from the
 if you want to update the fallback. It needs at least two columns:
 `SYMBOL` and `NAME OF COMPANY`.
 
+## NIFTY 50 live scanner
+
+At the bottom of the app, **"Run NIFTY 50 live scan"** fetches a real-time
+quote (via `nsetools`) for each of the 50 constituents, compares the live
+LTP to NSE's live intraday VWAP and to an EMA9 (daily closes with the
+current LTP appended as today's still-forming bar), and buckets each
+stock as bullish (LTP above both) or bearish (LTP below both), with a
+chart per stock. Quotes are cached for 15 seconds - re-run the scan to
+refresh. Scanning all 50 stocks makes 50+ live requests to NSE, so it can
+take a little while and is gated behind a button rather than running
+automatically.
+
 ## Deploying
 
 ### 1. Push to GitHub
