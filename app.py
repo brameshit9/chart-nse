@@ -2,11 +2,11 @@ from dateutil.relativedelta import relativedelta
 from datetime import datetime
 import io
 import pandas as pd
+import plotly.graph_objects as go
 import requests
 from bs4 import BeautifulSoup
 import streamlit as st
-from nsepython import equity_history
-from nsetools import Nse
+from nsepython import equity_history, nse_eq
 
 
 # ---------------------------------------------------------------------------
@@ -225,21 +225,23 @@ def add_ema(df: pd.DataFrame, span: int = 9) -> pd.DataFrame:
     return df
 
 
-@st.cache_resource
-def get_nse_client():
-    return Nse()
-
-
 @st.cache_data(ttl=15)
 def get_live_quote(symbol: str):
-    """Real-time NSE quote: last traded price, today's VWAP, day OHLC.
-    Cached for 15s so a full 50-stock scan doesn't hammer NSE, while still
-    staying close to live."""
-    nse = get_nse_client()
+    """Real-time LTP + today's VWAP via nsepython's nse_eq(), which reuses
+    the same NSE session as equity_history() (rather than opening a second,
+    separate session that NSE may block). Returns None on failure along
+    with the error string for debugging."""
     try:
-        return nse.get_quote(symbol)
-    except Exception:
-        return None
+        data = nse_eq(symbol)
+    except Exception as e:
+        return None, str(e)
+
+    price_info = (data or {}).get("priceInfo", {})
+    ltp = price_info.get("lastPrice")
+    vwap = price_info.get("vwap", price_info.get("averagePrice"))
+    if ltp is None or vwap is None:
+        return None, f"missing lastPrice/vwap in response: {price_info}"
+    return {"ltp": ltp, "vwap": vwap}, None
 
 
 @st.cache_data(ttl=15)
@@ -263,58 +265,110 @@ st.write("---")
 st.header("NIFTY 50 Scanner: Live Price vs VWAP & EMA9")
 st.caption(
     "Classifies each NIFTY 50 stock using its real-time last traded price "
-    "(LTP) against NSE's live intraday VWAP: bullish if LTP is above both "
-    "VWAP and EMA9, bearish if below both. EMA9 is computed from recent "
-    "daily closes with the current LTP appended as today's still-forming "
-    "bar, so it reflects the live price. Quotes are cached for 15 seconds "
-    "- re-run the scan to refresh."
+    "(LTP) against NSE's live VWAP: bullish if LTP is above both VWAP and "
+    "EMA9, bearish if below both. EMA9 is computed from recent daily "
+    "closes with the current LTP appended as today's still-forming bar. "
+    "Charts show daily candles (NSE's free data doesn't expose intraday "
+    "candles) with VWAP and EMA9 overlaid. Quotes are cached for 15 "
+    "seconds - re-run the scan to refresh."
 )
 
 if st.button("Run NIFTY 50 live scan"):
     above_stocks = {}
     below_stocks = {}
+    errors = {}
 
     progress = st.progress(0.0, text="Fetching live quotes...")
     for i, sym in enumerate(NIFTY_50_SYMBOLS):
-        quote = get_live_quote(sym)
+        quote, err = get_live_quote(sym)
         progress.progress((i + 1) / len(NIFTY_50_SYMBOLS), text=f"Fetching {sym}...")
-        if not quote:
+        if quote is None:
+            errors[sym] = err
             continue
 
-        ltp = quote.get("lastPrice")
-        vwap = quote.get("vwap")
-        if ltp is None or vwap is None:
-            continue
-
-        ema9, hist = get_live_ema9(sym, ltp)
+        ema9, hist = get_live_ema9(sym, quote["ltp"])
         if ema9 is None:
+            errors[sym] = "no historical data returned for EMA9"
             continue
 
-        entry = {"ltp": ltp, "vwap": vwap, "ema9": ema9, "hist": hist}
-        if ltp > vwap and ltp > ema9:
+        entry = {"ltp": quote["ltp"], "vwap": quote["vwap"], "ema9": ema9, "hist": hist}
+        if quote["ltp"] > quote["vwap"] and quote["ltp"] > ema9:
             above_stocks[sym] = entry
-        elif ltp < vwap and ltp < ema9:
+        elif quote["ltp"] < quote["vwap"] and quote["ltp"] < ema9:
             below_stocks[sym] = entry
     progress.empty()
 
     st.session_state.scan_above = above_stocks
     st.session_state.scan_below = below_stocks
+    st.session_state.scan_errors = errors
+
+    if len(errors) == len(NIFTY_50_SYMBOLS):
+        st.error(
+            "Every symbol failed to fetch a live quote - NSE is likely "
+            "blocking requests from this server's IP (common on cloud "
+            "hosts). Sample error: "
+            f"{next(iter(errors.values()))}"
+        )
+    elif errors:
+        with st.expander(f"⚠️ {len(errors)} symbol(s) failed to fetch"):
+            for sym, err in errors.items():
+                st.write(f"**{sym}**: {err}")
+
+
+def render_candlestick(sym: str, data: dict):
+    st.write(f"**{sym}**")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("LTP", f"₹{data['ltp']:.2f}")
+    c2.metric("VWAP", f"₹{data['vwap']:.2f}")
+    c3.metric("EMA9", f"₹{data['ema9']:.2f}")
+
+    hist = data["hist"].copy()
+    today_ts = pd.Timestamp(datetime.today().date())
+
+    if today_ts in hist.index:
+        hist.loc[today_ts, "Close"] = data["ltp"]
+        hist.loc[today_ts, "High"] = max(hist.loc[today_ts, "High"], data["ltp"])
+        hist.loc[today_ts, "Low"] = min(hist.loc[today_ts, "Low"], data["ltp"])
+    else:
+        prev_close = hist["Close"].iloc[-1]
+        hist.loc[today_ts] = {
+            "Open": prev_close,
+            "High": max(prev_close, data["ltp"]),
+            "Low": min(prev_close, data["ltp"]),
+            "Close": data["ltp"],
+            "Volume": 0,
+            "VWAP": data["vwap"],
+        }
+    hist = hist.sort_index()
+    hist["EMA9"] = hist["Close"].ewm(span=9, adjust=False).mean()
+
+    fig = go.Figure()
+    fig.add_trace(go.Candlestick(
+        x=hist.index, open=hist["Open"], high=hist["High"],
+        low=hist["Low"], close=hist["Close"], name="Price",
+    ))
+    fig.add_trace(go.Scatter(
+        x=hist.index, y=hist["EMA9"], mode="lines", name="EMA9",
+        line=dict(color="#facc15", width=2),
+    ))
+    if "VWAP" in hist.columns:
+        fig.add_trace(go.Scatter(
+            x=hist.index, y=hist["VWAP"], mode="lines", name="VWAP",
+            line=dict(color="#2dd4bf", width=2),
+        ))
+    fig.update_layout(
+        height=350,
+        margin=dict(l=10, r=10, t=30, b=10),
+        xaxis_rangeslider_visible=False,
+        template="plotly_dark",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    )
+    st.plotly_chart(fig, use_container_width=True, key=f"chart_{sym}")
 
 
 def render_group(stocks: dict):
     for sym, data in stocks.items():
-        st.write(f"**{sym}**")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("LTP", f"₹{data['ltp']:.2f}")
-        c2.metric("VWAP", f"₹{data['vwap']:.2f}")
-        c3.metric("EMA9", f"₹{data['ema9']:.2f}")
-
-        chart_df = data["hist"][["Close"]].copy()
-        today_ts = pd.Timestamp(datetime.today().date())
-        chart_df.loc[today_ts, "Close"] = data["ltp"]
-        chart_df = chart_df.sort_index()
-        chart_df["EMA9"] = chart_df["Close"].ewm(span=9, adjust=False).mean()
-        st.line_chart(chart_df[["Close", "EMA9"]])
+        render_candlestick(sym, data)
 
 
 if "scan_above" in st.session_state or "scan_below" in st.session_state:
